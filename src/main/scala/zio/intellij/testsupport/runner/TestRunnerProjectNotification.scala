@@ -5,19 +5,24 @@ import com.intellij.ide.{BrowserUtil, IdeBundle}
 import com.intellij.notification._
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ex.ApplicationInfoEx
-import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.{Project, ProjectUtil}
 import com.intellij.openapi.util.SystemInfo
 import org.jetbrains.annotations.NonNls
 import org.jetbrains.plugins.scala.project.{ModuleExt, ProjectExt}
+import org.jetbrains.sbt.SbtUtil
+import org.jetbrains.sbt.SbtUtil.getDefaultLauncher
+import org.jetbrains.sbt.project.SbtExternalSystemManager
 import zio.intellij.ZioIcon
 import zio.intellij.testsupport.runner.TestRunnerNotifications.{displayError, displayInfo}
 import zio.intellij.testsupport.runner.TestRunnerResolveService.{ResolveError, ResolveResult}
 import zio.intellij.utils.{ModuleSyntax, ScalaVersionHack, StringBuilderSyntax, Version}
 
+import java.io.File
 import java.net.URLEncoder
 import javax.swing.event.HyperlinkEvent
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
+import scala.util.Try
 
 private[runner] final class TestRunnerProjectNotification(private val project: Project) {
   def init(): Unit =
@@ -39,7 +44,8 @@ private[runner] final class TestRunnerProjectNotification(private val project: P
   private def shouldSuggestTestRunner(project: Project, downloadIfMissing: Boolean = false): Boolean =
     versions(project).foldLeft(false) {
       case (flag, (version, scalaVersion)) =>
-        flag | TestRunnerResolveService.instance
+        flag | TestRunnerResolveService
+          .instance(project)
           .resolve(version, scalaVersion, downloadIfMissing)
           .toOption
           .isEmpty
@@ -61,7 +67,8 @@ private[runner] final class TestRunnerProjectNotification(private val project: P
   private def downloadTestRunner(notification: Notification): Unit = {
     val tasks = versions(project).map {
       case (version, scalaVersion) =>
-        TestRunnerResolveService.instance
+        TestRunnerResolveService
+          .instance(project)
           .resolveAsync(
             version,
             scalaVersion,
@@ -96,9 +103,9 @@ private[runner] final class TestRunnerProjectNotification(private val project: P
         "Enable the integrated ZIO Test runner",
         href("download", "Download ZIO Test runner") + Nbsp * 6 +
           href("learn_more", "Learn more..."),
-        NotificationType.INFORMATION,
-        listener
+        NotificationType.INFORMATION
       )
+      .setListener(listener)
       .setIcon(ZioIcon)
 
   private def reportErrorOnGithub(results: List[ResolveResult], notification: Notification) = {
@@ -123,7 +130,7 @@ private[runner] final class TestRunnerProjectNotification(private val project: P
         s"""Unknown error: zio-test-intellij_${scalaVersion.versionStr}:$version"
            |Cause:
            |${cause.toString}""".stripMargin
-    }.mkString("---"))
+    }.mkString("---\n"))
     sb.appendLine("```")
     sb.appendLine("### Additional information:")
     sb.appendLine("<details>")
@@ -132,6 +139,7 @@ private[runner] final class TestRunnerProjectNotification(private val project: P
     sb.appendLine(s"Scala plugin version: ${pluginVersion("org.intellij.scala").getOrElse("unknown")}")
     sb.appendLine(s"ZIO version(s): ${versions(project).map(_._1).mkString(", ")}")
     sb.appendLine(s"Scala version(s): ${versions(project).map(_._2.minor).mkString(", ")}")
+    sb.appendLine(s"sbt version: ${Try(getSbtVersion(project)).getOrElse("N/A")}")
     val appInfo = ApplicationInfoEx.getInstanceEx
     sb.appendLine(s"IntelliJ version: ${appInfo.getFullApplicationName}")
     sb.appendLine(s"${IdeBundle.message("about.box.build.number", appInfo.getBuild.asString)}")
@@ -154,6 +162,19 @@ private[runner] final class TestRunnerProjectNotification(private val project: P
       s"https://github.com/zio/zio-intellij/issues/new?title=Problem+downloading+the+test+runner&labels=test-runner&body=$body"
     )
     finally notification.expire()
+  }
+
+  private def getSbtVersion(project: Project) = {
+    val workingDirPath =
+      Option(ProjectUtil.guessProjectDir(project))
+        .getOrElse(throw new IllegalStateException(s"no project directory found for project ${project.getName}"))
+        .getCanonicalPath
+    val workingDir = new File(workingDirPath)
+
+    val sbtSettings = SbtExternalSystemManager.executionSettingsFor(project, workingDirPath)
+    val launcher    = sbtSettings.customLauncher.getOrElse(getDefaultLauncher)
+
+    SbtUtil.detectSbtVersion(workingDir, launcher)
   }
 
   private def pluginVersion(id: String): Option[String] =
